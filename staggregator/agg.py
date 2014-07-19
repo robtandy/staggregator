@@ -53,20 +53,13 @@ class Agg:
 
         for metric in self.metrics.values():
             if (now - metric.last_flush_time) > self.flush_interval:
-                message = self.flush_metric(metric, now)
-                messages.append(message)
+                messages += metric.flush(now)
         if len(messages) > 0:
             async(self.send_messages(messages))
 
-        get_event_loop().call_later(1.0, self.flusher)
+        get_event_loop().call_later(0.25, self.flusher)
 
-    def flush_metric(self, metric, now):
-        log.debug('flushing {}'.format(metric.name))
-        message = (metric.name, (now, metric.accumulated_value))
-        metric.last_flush_time = now
-        metric.reset()
-        return message
-
+    @coroutine
     def send_messages(self, messages):
         log.info('sending message {}'.format(messages))
 
@@ -88,26 +81,46 @@ class Agg:
             # FIXME dump message to a log
 
 
-
 class Metric:
-    def __init__(self, name):
+    def __init__(self, name, flush_interval):
         self.name = name
         self.accumulated_value = 0.0
+        self.flush_interval = flush_interval
         self.last_flush_time = time.time()
         log.info('metric {} created'.format(name))
 
     def accumulate(self, value):
         pass
-    
+
+    def flush(self, now):
+        log.debug('flushing {}'.format(self.name))
+        m = self.get_messages(now)
+        
+        self.last_flush_time = now
+        self.reset()
+        return m
+
     def reset(self):
         pass
 
+    def get_messages(self): return []
+
 class CountMetric(Metric):
+    def __init__(self, name, flush_interval):
+        super().__init__(name, flush_interval)
+        self.rate = 0.0
+
     def accumulate(self, value):
         self.accumulated_value += value
+        self.rate = self.accumulated_value / self.flush_interval
+
+    def get_messages(self, now):
+        return [(self.name + '.count', (now, self.accumulated_value)),
+                (self.name + '.rate', (now, self.rate))]
 
     def reset(self):
         self.accumulated_value = 0.0
+        self.rate = 0.0
 
 class ConnectedClient:
     def __init__(self, reader, writer, agg):
@@ -140,7 +153,8 @@ class ConnectedClient:
     def handle_stat(self, metric_name, value, metric_type):
         if metric_type == 'c':
             if not metric_name in self.agg.metrics:
-                self.agg.metrics[metric_name] = CountMetric(metric_name)
+                self.agg.metrics[metric_name] = CountMetric(metric_name,
+                        self.agg.flush_interval)
 
             self.agg.metrics[metric_name].accumulate(value)
 
