@@ -39,6 +39,14 @@ class Agg:
         try:
             log.info('starting event loop')
             log.info('listening on {0}:{1}'.format(self.my_host, self.my_port))
+            log.info('sending data to carbon-cache at {0}:{1}'.format(
+                self.carbon_host, self.carbon_port))
+            log.info('flush interval to carbon is {0}s'.format(
+                self.flush_interval))
+            log.info('calculating {}th percentile(s)'.format(
+                ','.join(map(str,self.percent_thresholds))))
+            
+            log.info('listening on {0}:{1}'.format(self.my_host, self.my_port))
             loop.call_soon(self.flusher)
             loop.run_until_complete(s)
             loop.run_forever()
@@ -149,21 +157,30 @@ class TimerMetric(Metric):
         for percentile in self.thresholds:
             p = self._nth_percentile(sorted_values, percentile)
             s = '_' + str(percentile)
+
+            m = mean(p) if len(p) > 0 else 0
+            u = p[-1] if len(p) > 0 else 0
             
             messages.append((z+self.name + '.count'+s, (now, len(p))))
-            messages.append((z+self.name + '.mean'+s, (now, mean(p))))
-            messages.append((z+self.name + '.upper'+s, (now, p[-1])))
+            messages.append((z+self.name + '.mean'+s, (now, m)))
+            messages.append((z+self.name + '.upper'+s, (now, u)))
             messages.append((z+self.name + '.sum'+s, (now, sum(p))))
+
+        m = median(sorted_values) if len(sorted_values) > 0 else 0
+        e = mean(sorted_values) if len(sorted_values) > 0 else 0
+        u = sorted_values[-1] if len(sorted_values) > 0 else 0
+        l = sorted_values[0] if len(sorted_values) > 0 else 0
+        d = stdev(sorted_values) if len(sorted_values) > 1 else 0
 
         messages.append((z+self.name + '.count', (now, len(sorted_values))))
         messages.append((z+self.name + '.count_ps', 
             (now, len(sorted_values) / self.flush_interval)))
-        messages.append((z+self.name + '.mean', (now, mean(sorted_values))))
-        messages.append((z+self.name + '.median', (now, median(sorted_values))))
-        messages.append((z+self.name + '.std', (now, stdev(sorted_values))))
-        messages.append((z+self.name + '.upper', (now, sorted_values[-1])))
-        messages.append((z+self.name + '.lower', (now, sorted_values[0])))
+        messages.append((z+self.name + '.median', (now, m)))
+        messages.append((z+self.name + '.upper', (now, u)))
+        messages.append((z+self.name + '.lower', (now, l)))
         messages.append((z+self.name + '.sum', (now, sum(sorted_values))))
+        messages.append((z+self.name + '.mean', (now, e)))
+        messages.append((z+self.name + '.std', (now, d)))
 
         return messages
 
@@ -223,7 +240,7 @@ if __name__ == '__main__':
             help='hostname for listening socket', default='127.0.0.1')
     p.add_argument('-p', '--port', type=int,
             help='listening port for stats', default=5201)
-    p.add_argument('-c', '--carbon-host', type=str, 
+    p.add_argument('-c', '--carbon-host', type=str, default='127.0.0.1',
             help='hostname of carbon-cache, carbon-relay, \
                     or carbon-aggregator')
     p.add_argument('-q', '--carbon-port', type=int,
