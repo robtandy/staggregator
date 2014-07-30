@@ -192,7 +192,7 @@ class ConnectedClient:
     def __init__(self, reader, writer, agg):
         self.reader = reader
         self.writer = writer
-        self.line_re = re.compile('^([\w\.]+):(\w+)\|(\w+)$')
+        self.line_re = re.compile('^([\w\._-]+):(\d+)\|(\w+)$')
         self.agg = agg
 
     @coroutine
