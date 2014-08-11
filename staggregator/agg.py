@@ -22,7 +22,7 @@ log = logging.getLogger('staggregator')
 
 class Agg:
     def __init__(self, my_host, my_port, carbon_host, carbon_port, 
-            flush_interval, percent_thresholds, *, keys=None, 
+            flush_interval, percent_thresholds, *, 
             connection_timeout=10, top_namespace='stats'):
         self.my_host = my_host 
         self.my_port = my_port 
@@ -34,11 +34,6 @@ class Agg:
         self.connection_timeout = connection_timeout
         self.ns_prefix = top_namespace
         
-        self.keys = {}
-        if keys is not None:
-            for key, namespace in keys:
-                self.keys[namespace] = key
-
     def serv(self):
         loop = get_event_loop()
         s = start_server(self.client_connected, self.my_host, self.my_port,
@@ -269,8 +264,6 @@ if __name__ == '__main__':
             help='comma separated percent threshold list')
     p.add_argument('-f', '--config', type=str, default=None,
             help='path to config file')
-    p.add_argument('-a', '--authkeys', type=str, default='',
-            help='comma separated authkey=namespace_pattern pairs')
     
     args = p.parse_args()
     log.setLevel(getattr(logging, args.log_level, logging.INFO))
@@ -278,7 +271,7 @@ if __name__ == '__main__':
     log.debug('got args {}'.format(args))
     
     params = ['host', 'port', 'carbon_host', 'carbon_port', 'flush_interval',
-            'percent_thresholds', 'authkeys']
+            'percent_thresholds']
     agg_vars = {}
     # get values from cmd line
     for param in params:
@@ -298,13 +291,9 @@ if __name__ == '__main__':
                 agg_vars[param] = v
 
     agg_vars['pts']=[int(x) for x in agg_vars['percent_thresholds'].split(',')]
-    agg_vars['keys'] = []
-    if len(agg_vars['authkeys']) > 0:
-        agg_vars['keys'] = \
-                [x.split('=') for x in agg_vars['authkeys'].split(',')]
 
     log.debug('using agg_vars {0}'.format(agg_vars))
 
     Agg(agg_vars['host'], int(agg_vars['port']), agg_vars['carbon_host'], 
             int(agg_vars['carbon_port']), int(agg_vars['flush_interval']),
-            agg_vars['pts'], agg_vars['keys']).serv()
+            agg_vars['pts']).serv()
