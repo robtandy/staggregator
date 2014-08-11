@@ -11,17 +11,19 @@ import argparse
 import logging
 import sys
 import re
+import os
 import time
 import pickle
 import struct
+import configparser
 from statistics import mean, median, stdev
 
 log = logging.getLogger('staggregator')
 
 class Agg:
     def __init__(self, my_host, my_port, carbon_host, carbon_port, 
-            flush_interval, percent_thresholds, connection_timeout=10,
-            top_namespace='stats'):
+            flush_interval, percent_thresholds, *, keys=None, 
+            connection_timeout=10, top_namespace='stats'):
         self.my_host = my_host 
         self.my_port = my_port 
         self.carbon_host = carbon_host
@@ -31,6 +33,11 @@ class Agg:
         self.percent_thresholds = percent_thresholds
         self.connection_timeout = connection_timeout
         self.ns_prefix = top_namespace
+        
+        self.keys = {}
+        if keys is not None:
+            for key, namespace in keys:
+                self.keys[namespace] = key
 
     def serv(self):
         loop = get_event_loop()
@@ -120,6 +127,12 @@ class Metric:
 
     def get_messages(self): return []
 
+
+# count_ps_peak and rate_peak will be aggregated using the max 
+# aggregation method vs avg (assumping carbon is set up properly for this).
+# Now we can keep track of peak rate in this interval in addition
+# to average rate
+
 class CountMetric(Metric):
     def accumulate(self, value):
         self.accumulated_value += value
@@ -130,6 +143,8 @@ class CountMetric(Metric):
 
         return [(z+self.name + '.count', (now, self.accumulated_value)),
                 (z+self.name + '.rate', 
+                    (now, self.accumulated_value / self.flush_interval)),
+                (z+self.name + '.rate_peak', 
                     (now, self.accumulated_value / self.flush_interval))]
 
     def reset(self):
@@ -174,6 +189,8 @@ class TimerMetric(Metric):
 
         messages.append((z+self.name + '.count', (now, len(sorted_values))))
         messages.append((z+self.name + '.count_ps', 
+            (now, len(sorted_values) / self.flush_interval)))
+        messages.append((z+self.name + '.count_ps_peak', 
             (now, len(sorted_values) / self.flush_interval)))
         messages.append((z+self.name + '.median', (now, m)))
         messages.append((z+self.name + '.upper', (now, u)))
@@ -238,25 +255,56 @@ if __name__ == '__main__':
     p.add_argument('-l', '--log-level', default='INFO')
     p.add_argument('-H', '--host', type=str, 
             help='hostname for listening socket', default='127.0.0.1')
-    p.add_argument('-p', '--port', type=int,
-            help='listening port for stats', default=5201)
+    p.add_argument('-p', '--port', type=str,
+            help='listening port for stats', default='5201')
     p.add_argument('-c', '--carbon-host', type=str, default='127.0.0.1',
             help='hostname of carbon-cache, carbon-relay, \
                     or carbon-aggregator')
-    p.add_argument('-q', '--carbon-port', type=int,
-            help='carbon pickle port number', default=2004)
+    p.add_argument('-q', '--carbon-port', type=str,
+            help='carbon pickle port number', default='2004')
 
-    p.add_argument('-f', '--flush-interval', type=int, default=10,
+    p.add_argument('-i', '--flush-interval', type=str, default='10',
             help='flush interval (seconds)')
     p.add_argument('-t', '--percent-thresholds', type=str, default='90',
             help='comma separated percent threshold list')
+    p.add_argument('-f', '--config', type=str, default=None,
+            help='path to config file')
+    p.add_argument('-a', '--authkeys', type=str, default='',
+            help='comma separated authkey=namespace_pattern pairs')
     
     args = p.parse_args()
     log.setLevel(getattr(logging, args.log_level, logging.INFO))
     
     log.debug('got args {}'.format(args))
+    
+    params = ['host', 'port', 'carbon_host', 'carbon_port', 'flush_interval',
+            'percent_thresholds', 'authkeys']
+    agg_vars = {}
+    # get values from cmd line
+    for param in params:
+        value = getattr(args, param)
+        agg_vars[param] = value
+    
+    # over ride with any from config if specified
+    if args.config:
+        # dummy section header to satisfy config parser
+        s = '[H]' + os.linesep + open(args.config).read()
+        c = configparser.ConfigParser()
+        c.read_string(s)
 
-    pts = [int(x) for x in args.percent_thresholds.split(',')]
+        for param in params:
+            v = c.get('H', param, fallback=None)
+            if v:
+                agg_vars[param] = v
 
-    Agg(args.host, args.port, args.carbon_host, args.carbon_port,
-            args.flush_interval, pts).serv()
+    agg_vars['pts']=[int(x) for x in agg_vars['percent_thresholds'].split(',')]
+    agg_vars['keys'] = []
+    if len(agg_vars['authkeys']) > 0:
+        agg_vars['keys'] = \
+                [x.split('=') for x in agg_vars['authkeys'].split(',')]
+
+    log.debug('using agg_vars {0}'.format(agg_vars))
+
+    Agg(agg_vars['host'], int(agg_vars['port']), agg_vars['carbon_host'], 
+            int(agg_vars['carbon_port']), int(agg_vars['flush_interval']),
+            agg_vars['pts'], agg_vars['keys']).serv()
