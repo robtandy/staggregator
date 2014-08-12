@@ -77,21 +77,25 @@ class Agg:
     @coroutine
     def v1_stat(self, request, response):
         body = yield from request.body()
-        metric = json.loads(body.decode('utf-8'))
+        metrics = json.loads(body.decode('utf-8'))
+        log.debug('loaded {}'.format(metrics))
 
-        # get namespace
-        ns = metric['name'].split('.')[0]
+        # fixme, validate json with validictory
 
-        # check auth
-        if len(self.keys) > 0:
-            k = request.headers.get(self.auth_header_name, None)
-            log.debug('checking {0} against {1}'.format(
-                str(self.keys[key]) if k else 'None', ns))
-            if k is None or not self.keys[k].match(ns):
-                raise HTTPException(401, 'Unauthorized')
+        for metric in metrics:
+            # get namespace
+            ns = metric['name'].split('.')[0]
 
-        # got here, then auth is ok
-        self.handle_stat(metric['name'], metric['value'], metric['type'])
+            # check auth
+            if len(self.keys) > 0:
+                k = request.headers.get(self.auth_header_name, None)
+                log.debug('checking {0} against {1}'.format(
+                    str(self.keys[key]) if k else 'None', ns))
+                if k is None or not self.keys[k].match(ns):
+                    raise HTTPException(401, 'Unauthorized')
+
+            # got here, then auth is ok
+            self.handle_stat(metric['name'], metric['value'], metric['type'])
     
     def handle_stat(self, metric_name, value, metric_type):
         if metric_type == 'c':
