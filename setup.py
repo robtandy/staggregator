@@ -13,4 +13,5 @@ setup(name='staggregator',
       long_description="""
       A stats aggregator for graphite, in the spirit of statsd.""",
       packages=['staggregator'],
+      install_requires=['microhttpd >= 0.5.1'],
 )

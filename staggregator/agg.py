@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-__version__ = '0.1'
 __author__ = 'Rob Tandy'
 __license__ = 'MIT'
 
@@ -13,17 +12,20 @@ import sys
 import re
 import os
 import time
+import json
 import pickle
 import struct
 import configparser
 from statistics import mean, median, stdev
+from microhttpd import Application, HTTPException
 
 log = logging.getLogger('staggregator')
 
 class Agg:
     def __init__(self, my_host, my_port, carbon_host, carbon_port, 
             flush_interval, percent_thresholds, *, 
-            connection_timeout=10, top_namespace='stats'):
+            keys=None, connection_timeout=10, top_namespace='stats',
+            auth_header_name=None):
         self.my_host = my_host 
         self.my_port = my_port 
         self.carbon_host = carbon_host
@@ -33,11 +35,26 @@ class Agg:
         self.percent_thresholds = percent_thresholds
         self.connection_timeout = connection_timeout
         self.ns_prefix = top_namespace
+        self.keys = {}
+        self.auth_header_name = auth_header_name
+
+        if keys:
+            # auth header is required if keys are present so check that
+            if not self.auth_header_name:
+                raise Exception("auth_header_name cannot be None with keys \
+                        provided")
+            self.auth_header_name = self.auth_header_name.lower()
+
+            for key, regex in keys:
+                self.keys[key] = re.compile(regex)
         
-    def serv(self):
+
+        self.app = Application([
+            (r'^/v1/stat/?$', 'POST', self.v1_stat),
+            ])
+        
+    def serve(self):
         loop = get_event_loop()
-        s = start_server(self.client_connected, self.my_host, self.my_port,
-                loop=loop)
         try:
             log.info('starting event loop')
             log.info('listening on {0}:{1}'.format(self.my_host, self.my_port))
@@ -50,17 +67,44 @@ class Agg:
             
             log.info('listening on {0}:{1}'.format(self.my_host, self.my_port))
             loop.call_soon(self.flusher)
-            loop.run_until_complete(s)
-            loop.run_forever()
+            self.app.serve(self.my_host, self.my_port, keep_alive=False)
         except KeyboardInterrupt as k:
-            log.info('ending loop')
+            log.info('Keyboard Interrupt.  Stopping server.')
         finally:
             loop.close()
         log.info('done serving')
+    
+    @coroutine
+    def v1_stat(self, request, response):
+        body = yield from request.body()
+        metric = json.loads(body.decode('utf-8'))
 
-    def client_connected(self, client_reader, client_writer):
-        c = ConnectedClient(client_reader, client_writer, self)
-        async(c.handle())
+        # get namespace
+        ns = metric['name'].split('.')[0]
+
+        # check auth
+        if len(self.keys) > 0:
+            k = request.headers.get(self.auth_header_name, None)
+            log.debug('checking {0} against {1}'.format(
+                str(self.keys[key]) if k else 'None', ns))
+            if k is None or not self.keys[k].match(ns):
+                raise HTTPException(401, 'Unauthorized')
+
+        # got here, then auth is ok
+        self.handle_stat(metric['name'], metric['value'], metric['type'])
+    
+    def handle_stat(self, metric_name, value, metric_type):
+        if metric_type == 'c':
+            if not metric_name in self.metrics:
+                self.metrics[metric_name] = CountMetric(metric_name,
+                        self.ns_prefix, self.flush_interval)
+        elif metric_type == 'ms':
+            if not metric_name in self.metrics:
+                self.metrics[metric_name] = TimerMetric(metric_name,
+                        self.ns_prefix, self.flush_interval,
+                        self.percent_thresholds)
+
+        self.metrics[metric_name].accumulate(value)
     
     def flusher(self):
         now = time.time()
@@ -120,7 +164,7 @@ class Metric:
     def reset(self):
         pass
 
-    def get_messages(self): return []
+    def get_messages(self, timestamp): return []
 
 
 # count_ps_peak and rate_peak will be aggregated using the max 
@@ -199,55 +243,12 @@ class TimerMetric(Metric):
     def reset(self):
         self.values = []
 
-
-class ConnectedClient:
-    def __init__(self, reader, writer, agg):
-        self.reader = reader
-        self.writer = writer
-        self.line_re = re.compile('^([\w\._-]+):(\d+)\|(\w+)$')
-        self.agg = agg
-
-    @coroutine
-    def _nextline(self):
-        return (yield from self.reader.readline()).decode('utf-8').rstrip()
-    
-    @coroutine
-    def handle(self):
-
-        while True:
-            line = yield from self._nextline()
-            if not line:
-                break
-            # lines are in the format <metricname>:<value>|<type>, per statsd
-            match = self.line_re.match(line)
-            if match is None:
-                log.debug('bad line received {}'.format(line))
-                continue
-            metric_name, value, metric_type = match.groups()
-            value = float(value)
-            self.handle_stat(metric_name, value, metric_type)
-
-
-    def handle_stat(self, metric_name, value, metric_type):
-        if metric_type == 'c':
-            if not metric_name in self.agg.metrics:
-                self.agg.metrics[metric_name] = CountMetric(metric_name,
-                        self.agg.ns_prefix, self.agg.flush_interval)
-        elif metric_type == 'ms':
-            if not metric_name in self.agg.metrics:
-                self.agg.metrics[metric_name] = TimerMetric(metric_name,
-                        self.agg.ns_prefix, self.agg.flush_interval,
-                        self.agg.percent_thresholds)
-
-        self.agg.metrics[metric_name].accumulate(value)
-
-
 if __name__ == '__main__':
     logging.basicConfig(stream=sys.stdout, level=logging.ERROR,
-            format='%(asctime)s | %(levelname)s | %(message)s')
+            format='%(asctime)s | %(name)s | %(levelname)s | %(message)s')
 
     p = argparse.ArgumentParser()
-    p.add_argument('-l', '--log-level', default='INFO')
+    p.add_argument('-l', '--log-level', default='ERROR')
     p.add_argument('-H', '--host', type=str, 
             help='hostname for listening socket', default='127.0.0.1')
     p.add_argument('-p', '--port', type=str,
@@ -273,6 +274,8 @@ if __name__ == '__main__':
     params = ['host', 'port', 'carbon_host', 'carbon_port', 'flush_interval',
             'percent_thresholds']
     agg_vars = {}
+    keys = []
+    auth_header_name = None
     # get values from cmd line
     for param in params:
         value = getattr(args, param)
@@ -281,14 +284,26 @@ if __name__ == '__main__':
     # over ride with any from config if specified
     if args.config:
         # dummy section header to satisfy config parser
-        s = '[H]' + os.linesep + open(args.config).read()
+        s = open(args.config).read()
         c = configparser.ConfigParser()
         c.read_string(s)
 
         for param in params:
-            v = c.get('H', param, fallback=None)
+            v = c.get('staggregator', param, fallback=None)
             if v:
                 agg_vars[param] = v
+
+        # set up logging levels per config file
+        for name, level in c.items('logging'):
+            logging.getLogger(name).setLevel(getattr(logging, level))
+
+        # get keys
+        for key, regex in c.items('keys'):
+            keys.append((key,regex))
+
+        auth_header_name = c.get('staggregator', 'auth_header_name', 
+                fallback=None)
+
 
     agg_vars['pts']=[int(x) for x in agg_vars['percent_thresholds'].split(',')]
 
@@ -296,4 +311,5 @@ if __name__ == '__main__':
 
     Agg(agg_vars['host'], int(agg_vars['port']), agg_vars['carbon_host'], 
             int(agg_vars['carbon_port']), int(agg_vars['flush_interval']),
-            agg_vars['pts']).serv()
+            agg_vars['pts'], keys=keys, 
+            auth_header_name=auth_header_name).serve()
