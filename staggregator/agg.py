@@ -86,12 +86,13 @@ class Agg:
             # get namespace
             ns = metric['name'].split('.')[0]
 
-            # check auth
+            # check auth if we have keys
             if len(self.keys) > 0:
-                k = request.headers.get(self.auth_header_name, None)
-                log.debug('checking {0} against {1}'.format(
-                    str(self.keys[key]) if k else 'None', ns))
-                if k is None or not self.keys[k].match(ns):
+                key = request.headers.get(self.auth_header_name, None)
+                if key is None or \
+                        not key in self.keys or \
+                        not self.keys[key].match(ns):
+                    log.warning('{0} Unauthorized for {1}'.format(key, ns))
                     raise HTTPException(401, 'Unauthorized')
 
             # got here, then auth is ok
